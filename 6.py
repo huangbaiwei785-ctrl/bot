@@ -1,6 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
+import os
 
 # ================= 基礎設定區 =================
 TOKEN = os.getenv("DISCORD_TOKEN")
