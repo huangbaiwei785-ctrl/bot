@@ -35,8 +35,7 @@ class MyBot(commands.Bot):
         try:
             with open(DATA_FILE, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            print(f"❌ 存檔失敗: {e}")
+        except Exception as e: print(f"❌ 存檔失敗: {e}")
 
     def load_all_data(self):
         if os.path.exists(DATA_FILE):
@@ -48,8 +47,7 @@ class MyBot(commands.Bot):
                     raw_warns = data.get("warn_records", {})
                     self.warn_records = {int(k): v for k, v in raw_warns.items()}
                 print("📁 數據已載入")
-            except Exception as e:
-                print(f"❌ 讀取失敗: {e}")
+            except Exception as e: print(f"❌ 讀取失敗: {e}")
 
     async def setup_hook(self):
         self.load_all_data()
@@ -57,100 +55,125 @@ class MyBot(commands.Bot):
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
         self.auto_backup_task.start() 
-        print(f"✅ 機器人上線！自動備份設定：每 6 小時一次")
+        print(f"✅ 機器人上線！備份頻道: {BACKUP_CHANNEL_ID}")
 
-    @tasks.loop(hours=6) # 👈 修改為 6 小時
+    @tasks.loop(hours=6)
     async def auto_backup_task(self):
         await self.wait_until_ready()
-        await self.perform_full_backup("系統 6 小時例行備份")
+        await self.perform_full_backup("例行 6 小時備份")
 
     async def perform_full_backup(self, reason):
         channel = self.get_channel(BACKUP_CHANNEL_ID)
         if not channel: return
         guild = self.get_guild(MY_GUILD_ID)
         if not guild: return
-
-        structure = {
+        
+        # 結構備份
+        struct = {
             "server_name": guild.name,
             "backup_time": str(datetime.datetime.now()),
-            "roles": [f"{r.name} (ID: {r.id})" for r in guild.roles],
-            "channels": [f"#{ch.name} ({ch.type})" for ch in guild.channels]
+            "roles": [f"{r.name}" for r in guild.roles],
+            "categories": [c.name for c in guild.categories]
         }
-        struct_file = "server_backup.json"
-        with open(struct_file, "w", encoding="utf-8") as f:
-            json.dump(structure, f, ensure_ascii=False, indent=4)
+        with open("server_backup.json", "w", encoding="utf-8") as f:
+            json.dump(struct, f, ensure_ascii=False, indent=4)
 
         self.save_all_data()
         await channel.send(
-            f"📦 **[{reason}]**\n📅 時間：{datetime.datetime.now().strftime('%m/%d %H:%M')}",
-            files=[discord.File(DATA_FILE), discord.File(struct_file)]
+            f"📦 **[{reason}]**",
+            files=[discord.File(DATA_FILE), discord.File("server_backup.json")]
         )
 
 bot = MyBot()
 
-# --- 1. /警告 ---
-@bot.tree.command(name="警告", description="記警告")
-@app_commands.describe(成員="對象", 理由="原因")
-@app_commands.default_permissions(administrator=True) 
-async def warn(interaction: discord.Interaction, 成員: discord.Member, 理由: str):
-    user_id = 成員.id
-    bot.warn_records[user_id] = bot.warn_records.get(user_id, 0) + 1
-    bot.save_all_data()
-    embed = discord.Embed(title="⚠️ 警告", description=f"{成員.mention}\n理由：{理由}\n累計：`{bot.warn_records[user_id]}` 次", color=0xFF0000)
-    await interaction.response.send_message(content=成員.mention, embed=embed)
-
-# --- 2. /還原 (核心新功能) ---
-@bot.tree.command(name="還原", description="從上傳的 data.json 檔案恢復數據")
-@app_commands.describe(備份檔="請拖入備份頻道中的 data.json 檔案")
+# --- 1. /公告 (新增：自動銷掉舊置頂) ---
+@bot.tree.command(name="公告", description="發送新公告，並自動取消機器人的舊置頂公告")
+@app_commands.describe(標題="標題", 內容="內容")
 @app_commands.default_permissions(administrator=True)
-async def restore_data(interaction: discord.Interaction, 備份檔: discord.Attachment):
-    if not 備份檔.filename.endswith(".json"):
-        await interaction.response.send_message("❌ 請上傳正確的 `.json` 格式檔案。", ephemeral=True)
-        return
-
+async def announcement(interaction: discord.Interaction, 標題: str, 內容: str):
     await interaction.response.defer(ephemeral=True)
     
+    # A. 先找出並取消機器人之前的置頂
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(備份檔.url) as resp:
-                if resp.status == 200:
-                    content = await resp.text()
-                    data = json.loads(content)
-                    
-                    # 覆蓋目前記憶體中的數據
-                    bot.target_message_id = data.get("target_message_id")
-                    bot.current_emoji = data.get("current_emoji", "🤡")
-                    raw_warns = data.get("warn_records", {})
-                    bot.warn_records = {int(k): v for k, v in raw_warns.items()}
-                    
-                    # 立即寫入本地磁碟
-                    bot.save_all_data()
-                    await interaction.followup.send("✅ 數據還原成功！警告紀錄與身分組 ID 已更新。")
-                else:
-                    await interaction.followup.send("❌ 無法下載檔案。")
-    except Exception as e:
-        await interaction.followup.send(f"❌ 還原過程發生錯誤：{e}")
+        pins = await interaction.channel.pins()
+        for pin in pins:
+            if pin.author.id == bot.user.id:
+                await pin.unpin()
+    except:
+        pass # 忽略權限不足或其他錯誤
 
-# --- 3. /備份數據 ---
-@bot.tree.command(name="備份數據", description="手動執行備份")
+    # B. 發布新公告
+    time_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    msg_content = f"# 📢 {標題}\n\n{內容}\n\n> 🕒 公告時間：{time_str}\n---"
+    
+    new_msg = await interaction.channel.send(msg_content)
+    
+    # C. 置頂新公告
+    try:
+        await new_msg.pin()
+        await interaction.followup.send("✅ 舊置頂已撤下，新公告已發布並置頂。")
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ 公告已發送，但置頂失敗: {e}")
+
+# --- 2. /還原 (數據 + 架構補建) ---
+@bot.tree.command(name="還原", description="從備份檔恢復數據與缺失架構")
+@app_commands.describe(數據備份="上傳 data.json", 架構備份="上傳 server_backup.json (選填)")
 @app_commands.default_permissions(administrator=True)
-async def manual_backup(interaction: discord.Interaction):
-    await interaction.response.send_message("⌛ 備份中...", ephemeral=True)
-    await bot.perform_full_backup(f"手動執行: {interaction.user.name}")
+async def restore_all(interaction: discord.Interaction, 數據備份: discord.Attachment, 架構備份: discord.Attachment = None):
+    await interaction.response.defer(ephemeral=True)
+    async with aiohttp.ClientSession() as session:
+        # 還原數據
+        async with session.get(數據備份.url) as resp:
+            if resp.status == 200:
+                data = json.loads(await resp.text())
+                bot.target_message_id = data.get("target_message_id")
+                bot.current_emoji = data.get("current_emoji", "🤡")
+                bot.warn_records = {int(k): v for k, v in data.get("warn_records", {}).items()}
+                bot.save_all_data()
+                res = "✅ 數據還原成功！"
+            else:
+                return await interaction.followup.send("❌ 下載失敗")
+
+        # 補建架構 (分類與身分組)
+        if 架構備份:
+            async with session.get(架構備份.url) as resp:
+                if resp.status == 200:
+                    struct = json.loads(await resp.text())
+                    guild = interaction.guild
+                    exist_roles = [r.name for r in guild.roles]
+                    for r_name in struct.get("roles", []):
+                        if r_name not in exist_roles and r_name != "@everyone":
+                            await guild.create_role(name=r_name)
+                    exist_cats = [c.name for c in guild.categories]
+                    for c_name in struct.get("categories", []):
+                        if c_name not in exist_cats:
+                            await guild.create_category(c_name)
+                    res += "\n🏗️ 架構已補齊。"
+    await interaction.followup.send(res)
+
+# --- 3. /警告 ---
+@bot.tree.command(name="警告", description="記警告")
+@app_commands.default_permissions(administrator=True) 
+async def warn(interaction: discord.Interaction, 成員: discord.Member, 理由: str):
+    uid = 成員.id
+    bot.warn_records[uid] = bot.warn_records.get(uid, 0) + 1
+    bot.save_all_data()
+    embed = discord.Embed(title="⚠️ 警告", description=f"{成員.mention}\n理由：{理由}\n累計：`{bot.warn_records[uid]}` 次", color=0xFF0000)
+    await interaction.response.send_message(content=成員.mention, embed=embed)
 
 # --- 4. /身分組 ---
 @bot.tree.command(name="身分組", description="發送領取訊息")
 async def roles_setup(interaction: discord.Interaction, 標題: str, 內容: str, 表情: str = "🤡"):
     bot.current_emoji = 表情
     embed = discord.Embed(title=標題, description=內容 + f"\n\n點擊 {表情} 領取身分組", color=0xFFAA00)
-    await interaction.response.send_message(f"✅ 已產生", ephemeral=True)
+    await interaction.response.send_message("✅ 已發送", ephemeral=True)
     msg = await interaction.channel.send(embed=embed)
     bot.target_message_id = msg.id
     bot.save_all_data()
     try: await msg.add_reaction(表情)
     except: pass
 
-# --- 反應監聽 (不變) ---
+# --- 反應監聽 (身分組) ---
 @bot.event
 async def on_raw_reaction_add(payload):
     if payload.message_id == bot.target_message_id and str(payload.emoji) == bot.current_emoji:
@@ -167,9 +190,7 @@ async def on_raw_reaction_remove(payload):
         role = guild.get_role(ROLE_ID)
         try:
             member = await guild.fetch_member(payload.user_id)
-            if role and member and not member.bot:
-                await member.remove_roles(role)
+            if role and member and not member.bot: await member.remove_roles(role)
         except: pass
 
-if TOKEN:
-    bot.run(TOKEN)
+bot.run(TOKEN)
