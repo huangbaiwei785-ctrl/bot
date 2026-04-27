@@ -46,7 +46,6 @@ class IntegratedBot(commands.Bot):
         await self.tree.sync(guild=guild)
         self.auto_backup.start()
 
-    # --- 領取身分組邏輯 ---
     async def on_raw_reaction_add(self, payload):
         if payload.message_id == self.db.get("target_message_id") and str(payload.emoji) == self.db.get("current_emoji"):
             guild = self.get_guild(payload.guild_id)
@@ -76,23 +75,17 @@ class IntegratedBot(commands.Bot):
 
 bot = IntegratedBot()
 
-# --- 核心公告置頂管理 (上限 3 則) ---
+# --- 核心公告與釘選管理 ---
 async def send_smart_announcement(content: str):
     ch = bot.get_channel(ANNOUNCE_CHANNEL_ID) or await bot.fetch_channel(ANNOUNCE_CHANNEL_ID)
     if not ch: return
-    
-    # 發送新公告
     new_msg = await ch.send(content=f"@everyone\n# {content}")
     await new_msg.pin()
-    
-    # 檢查釘選數量
     pins = await ch.pins()
     if len(pins) > 3:
-        # 解除最舊的一則 (pins 列表最後一則通常是最早釘選的)
-        oldest_pin = pins[-1]
-        await oldest_pin.unpin()
+        await pins[-1].unpin()
 
-# --- 核心處罰邏輯 ---
+# --- 核心通知與處罰邏輯 ---
 async def process_warn_and_punishment(member_id: int, reason: str):
     guild = bot.get_guild(MY_GUILD_ID) or await bot.fetch_guild(MY_GUILD_ID)
     uid = str(member_id)
@@ -164,7 +157,7 @@ def index():
                 </form>
                 <hr style="margin:20px 0;">
                 <p style="font-size:12px; color:gray;">📥 數據還原</p>
-                <form action="/restore" method="post" enctype="multipart/form-data"><input type="file" name="file" accept=".json" required><button type="submit" style="background:#8b5cf6;">匯入並還原</button></form>
+                <form action="/restore" method="post" enctype="multipart/form-data"><input type="file" name="file" accept=".json" required><button type="submit" style="background:#8b5cf6;">匯入還原</button></form>
                 <form action="/backup" method="post" style="margin-top:10px;"><button type="submit" style="background:#10b981;">📦 手動備份</button></form>
             </div>
             <a href="/logout" style="display:block; padding:20px; color:red; text-decoration:none;">🚪 登出系統</a>
@@ -172,14 +165,14 @@ def index():
         <div class="main">
             <div class="card"><h2>📌 狀態</h2><p>領取身分組訊息 ID: {{ db.target_message_id }}</p></div>
             <div class="card">
-                <h2>📢 發送公告 (自動保留最新 3 則釘選)</h2>
-                <form action="/announce" method="post"><textarea name="content" rows="3" placeholder="公告內容..." required></textarea><button type="submit">發布新公告</button></form>
+                <h2>📢 發送公告 (保留3則釘選)</h2>
+                <form action="/announce" method="post"><textarea name="content" rows="3" required></textarea><button type="submit">發布新公告</button></form>
             </div>
             <div class="card">
                 <h2>⚠️ 紀錄名單</h2>
                 <table><tr><th>ID</th><th>警告</th><th>累犯</th></tr>
                 {% for uid, count in db.warn_records.items() %}
-                <tr><td><code>{{ uid }}</code></td><td>{{ count }} 支</td><td>{{ db.violation_records.get(uid, 0) }} 次</td></tr>
+                <tr><td><code>{{ uid }}</code></td><td>{{ count }}</td><td>{{ db.violation_records.get(uid, 0) }}</td></tr>
                 {% endfor %}
                 </table>
             </div>
@@ -200,10 +193,20 @@ def logout(): session.pop('user', None); return redirect('/')
 @app.route('/quick_warn', methods=['POST'])
 def quick_warn():
     uid, reason, act = request.form.get('uid'), request.form.get('reason'), request.form.get('act')
-    if act == "add": bot.db["warn_records"][uid] = bot.db["warn_records"].get(uid, 0) + 1
-    else: bot.db["warn_records"][uid] = max(0, bot.db["warn_records"].get(uid, 0) - 1)
-    bot.save_data()
-    if act == "add": bot.loop.create_task(process_warn_and_punishment(int(uid), reason))
+    log_ch = bot.get_channel(WARN_LOG_CHANNEL_ID)
+    if act == "add":
+        bot.db["warn_records"][uid] = bot.db["warn_records"].get(uid, 0) + 1
+        bot.save_data()
+        bot.loop.create_task(process_warn_and_punishment(int(uid), reason))
+    else:
+        new_val = max(0, bot.db["warn_records"].get(uid, 0) - 1)
+        bot.db["warn_records"][uid] = new_val
+        bot.save_data()
+        if log_ch:
+            embed = discord.Embed(title="次數調整：網頁扣除警告", color=0xf1c40f, timestamp=datetime.datetime.now())
+            embed.add_field(name="👤 用戶 ID", value=f"`{uid}`", inline=False)
+            embed.add_field(name="🔢 剩餘警告", value=f"**{new_val}** / 4", inline=True)
+            bot.loop.create_task(log_ch.send(embed=embed))
     return redirect('/')
 
 @app.route('/restore', methods=['POST'])
@@ -223,19 +226,38 @@ def web_backup():
     bot.loop.create_task(bot.send_backup("網頁手動備份"))
     return redirect('/')
 
-# --- Discord 指令 ---
+# --- Discord 指令修正區 (解決無回應問題) ---
 @bot.tree.command(name="警告")
-async def warn_cmd(interaction, 成員: discord.Member, 理由: str, 動作: str = "增加", 數量: int = 1):
+async def warn_cmd(interaction: discord.Interaction, 成員: discord.Member, 理由: str, 動作: str = "增加", 數量: int = 1):
     uid = str(成員.id)
-    if 動作 == "增加": bot.db["warn_records"][uid] = bot.db["warn_records"].get(uid, 0) + 數量
-    else: bot.db["warn_records"][uid] = max(0, bot.db["warn_records"].get(uid, 0) - 數量)
-    bot.save_data()
-    await interaction.response.send_message(f"✅ 已處理 {成員.mention}", ephemeral=True)
-    if 動作 == "增加": await process_warn_and_punishment(成員.id, 理由)
+    log_ch = bot.get_channel(WARN_LOG_CHANNEL_ID) or await bot.fetch_channel(WARN_LOG_CHANNEL_ID)
+    
+    if 動作 == "增加":
+        bot.db["warn_records"][uid] = bot.db["warn_records"].get(uid, 0) + 數量
+        bot.save_data()
+        # 立即回覆，防止顯示無回應
+        await interaction.response.send_message(f"✅ 已處理：增加 {成員.mention} {數量} 支警告", ephemeral=True)
+        await process_warn_and_punishment(成員.id, 理由)
+    
+    else: # 扣除
+        old_val = bot.db["warn_records"].get(uid, 0)
+        new_val = max(0, old_val - 數量)
+        bot.db["warn_records"][uid] = new_val
+        bot.save_data()
+        # 立即回覆
+        await interaction.response.send_message(f"✅ 已處理：扣除 {成員.mention} {數量} 支警告", ephemeral=True)
+        
+        if log_ch:
+            embed = discord.Embed(title="次數調整：指令扣除警告", color=0xf1c40f, timestamp=datetime.datetime.now())
+            embed.add_field(name="👤 成員", value=成員.mention, inline=False)
+            embed.add_field(name="📝 理由", value=理由, inline=False)
+            embed.add_field(name="🔢 調整後警告數", value=f"**{new_val}** / 4", inline=True)
+            embed.set_footer(text=f"執行者: {interaction.user.display_name}")
+            await log_ch.send(embed=embed)
 
 @bot.tree.command(name="公告")
 async def announce_cmd(interaction, 內容: str):
-    await interaction.response.send_message("⌛ 正在發布公告...", ephemeral=True)
+    await interaction.response.send_message("⌛ 公告正在發布並釘選...", ephemeral=True)
     await send_smart_announcement(內容)
 
 @bot.tree.command(name="身分組")
