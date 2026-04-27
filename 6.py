@@ -23,10 +23,13 @@ def load_db():
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
         return data
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if "violation_records" not in data: data["violation_records"] = {}
-    return data
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if "violation_records" not in data: data["violation_records"] = {}
+        return data
+    except:
+        return {"target_message_id": None, "current_emoji": "✅", "warn_records": {}, "violation_records": {}}
 
 class IntegratedBot(commands.Bot):
     def __init__(self):
@@ -43,7 +46,6 @@ class IntegratedBot(commands.Bot):
         await self.tree.sync(guild=guild)
         self.auto_backup.start()
 
-    # --- 反應領取身分組邏輯 ---
     async def on_raw_reaction_add(self, payload):
         if payload.message_id == self.db.get("target_message_id") and str(payload.emoji) == self.db.get("current_emoji"):
             guild = self.get_guild(payload.guild_id)
@@ -60,12 +62,11 @@ class IntegratedBot(commands.Bot):
             if role and member and not member.bot:
                 await member.remove_roles(role)
 
-    # --- 備份功能 ---
     async def send_backup(self, reason):
         ch = self.get_channel(BACKUP_CHANNEL_ID) or await self.fetch_channel(BACKUP_CHANNEL_ID)
         if ch:
             self.save_data()
-            await ch.send(f"📦 **Gxyn Clan [{reason}]** (時間: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')})", file=discord.File(DATA_FILE))
+            await ch.send(f"📦 **Gxyn Clan [{reason}]**", file=discord.File(DATA_FILE))
 
     @tasks.loop(hours=6)
     async def auto_backup(self):
@@ -74,49 +75,41 @@ class IntegratedBot(commands.Bot):
 
 bot = IntegratedBot()
 
-# --- 核心通知與處罰邏輯 ---
 async def process_warn_and_punishment(member_id: int, reason: str):
     guild = bot.get_guild(MY_GUILD_ID) or await bot.fetch_guild(MY_GUILD_ID)
     uid = str(member_id)
     log_ch = bot.get_channel(WARN_LOG_CHANNEL_ID) or await bot.fetch_channel(WARN_LOG_CHANNEL_ID)
     member = guild.get_member(member_id) or await guild.fetch_member(member_id)
-    
     if not log_ch: return
 
     current_warns = bot.db["warn_records"].get(uid, 0)
 
-    # 1. 如果警告不滿 4 支，發送藍色紀錄通知
     if current_warns < 4:
         embed = discord.Embed(title="⚠️ Gxyn Clan 警告紀錄", color=0x3498db, timestamp=datetime.datetime.now())
         embed.add_field(name="👤 被處罰人", value=f"{member.mention if member else uid}", inline=False)
         embed.add_field(name="📝 理由", value=reason, inline=False)
         embed.add_field(name="🔢 目前警告數", value=f"**{current_warns}** / 4", inline=True)
         await log_ch.send(content=f"{member.mention if member else ''}", embed=embed)
-    
-    # 2. 如果警告滿 4 支，觸發處罰邏輯
     else:
-        bot.db["warn_records"][uid] = 0 # 歸零
+        bot.db["warn_records"][uid] = 0
         bot.db["violation_records"][uid] = bot.db["violation_records"].get(uid, 0) + 1
         v_count = bot.db["violation_records"][uid]
         bot.save_data()
 
         if v_count >= 3:
             embed = discord.Embed(title="🚫 Gxyn Clan 永久停權處分", color=0xff0000, timestamp=datetime.datetime.now())
-            embed.add_field(name="👤 被處罰人", value=f"{member.mention if member else uid}", inline=False)
             embed.add_field(name="📝 理由", value=reason, inline=False)
             embed.add_field(name="📊 累犯紀錄", value=f"已達 3 次", inline=True)
             if member: await member.ban(reason=f"累犯滿 3 次：{reason}")
             await log_ch.send(content=f"{member.mention if member else ''}", embed=embed)
         else:
             embed = discord.Embed(title="🔇 Gxyn Clan 滿額禁言處置", color=0xffaa00, timestamp=datetime.datetime.now())
-            embed.add_field(name="👤 被處罰人", value=f"{member.mention if member else uid}", inline=False)
             embed.add_field(name="📝 理由", value=reason, inline=False)
             embed.add_field(name="📈 累犯進度", value=f"第 {v_count} / 3 次", inline=True)
-            embed.add_field(name="⏳ 懲罰", value="禁言 1 天並警告歸零", inline=False)
             if member: await member.timeout(datetime.timedelta(days=1), reason=f"警告滿 4 支：{reason}")
             await log_ch.send(content=f"{member.mention if member else ''}", embed=embed)
 
-# --- Flask 網頁 ---
+# --- Flask ---
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
@@ -135,7 +128,6 @@ def index():
             textarea, input, button { width: 100%; padding: 10px; margin: 5px 0; border-radius: 6px; border: 1px solid #d1d5db; box-sizing: border-box; }
             button { background: var(--primary); color: white; border: none; font-weight: bold; cursor: pointer; }
             table { width: 100%; border-collapse: collapse; } th, td { padding: 12px; border-bottom: 1px solid #f3f4f6; text-align: left; }
-            .side-title { padding: 25px; font-weight: bold; color: var(--primary); font-size: 20px; border-bottom: 2px solid #f3f4f6; }
         </style>
     </head>
     <body>
@@ -143,7 +135,7 @@ def index():
         <div style="margin: 100px auto;" class="card"><form method="post" action="/login"><h2>Gxyn 登入</h2><input type="password" name="pwd" required><button type="submit">登入</button></form></div>
     {% else %}
         <div class="sidebar">
-            <div class="side-title">Gxyn Clan</div>
+            <div style="padding:25px; font-weight:bold; color:var(--primary); font-size:20px;">Gxyn Clan</div>
             <div style="padding:20px;">
                 <p style="font-size:12px; color:gray;">⚠️ 警告處置</p>
                 <form action="/quick_warn" method="post">
@@ -152,27 +144,32 @@ def index():
                     <button type="submit" name="act" value="add">增加警告 (+)</button>
                     <button type="submit" name="act" value="sub" style="background:#f59e0b;">扣除警告 (-)</button>
                 </form>
-                <hr style="margin: 20px 0; border: 0; border-top: 1px solid #eee;">
-                <form action="/backup" method="post"><button type="submit" style="background:#10b981;">📦 手動備份</button></form>
+                <hr style="margin:20px 0;">
+                <p style="font-size:12px; color:gray;">📥 數據還原</p>
+                <form action="/restore" method="post" enctype="multipart/form-data">
+                    <input type="file" name="file" accept=".json" required>
+                    <button type="submit" style="background:#8b5cf6;">匯入並還原</button>
+                </form>
+                <form action="/backup" method="post" style="margin-top:10px;"><button type="submit" style="background:#10b981;">📦 手動備份</button></form>
             </div>
             <a href="/logout" style="display:block; padding:20px; color:red; text-decoration:none;">🚪 登出系統</a>
         </div>
         <div class="main">
             <div class="card">
                 <h2>📌 系統狀態</h2>
-                <p>身分組訊息 ID: <b>{{ db.target_message_id if db.target_message_id else '未設定' }}</b></p>
-                <p>反應表情: <span style="font-size:20px;">{{ db.current_emoji }}</span></p>
+                <p>訊息 ID: <b>{{ db.target_message_id if db.target_message_id else '未設定' }}</b></p>
+                <p>反應表情: {{ db.current_emoji }}</p>
             </div>
             <div class="card">
-                <h2>📢 發送全大字公告</h2>
-                <form action="/announce" method="post"><textarea name="content" rows="3" placeholder="公告內容..." required></textarea><button type="submit">發送至公告頻道</button></form>
+                <h2>📢 發送公告</h2>
+                <form action="/announce" method="post"><textarea name="content" rows="3" required></textarea><button type="submit">發送</button></form>
             </div>
             <div class="card">
                 <h2>⚠️ 紀錄名單</h2>
                 <table>
-                    <tr><th>用戶 ID</th><th>警告數</th><th>累犯次數</th></tr>
+                    <tr><th>ID</th><th>警告數</th><th>累犯</th></tr>
                     {% for uid, count in db.warn_records.items() %}
-                    <tr><td><code>{{ uid }}</code></td><td>{{ count }} 支</td><td>{{ db.violation_records.get(uid, 0) }} 次</td></tr>
+                    <tr><td><code>{{ uid }}</code></td><td>{{ count }}</td><td>{{ db.violation_records.get(uid, 0) }}</td></tr>
                     {% endfor %}
                 </table>
             </div>
@@ -199,6 +196,14 @@ def quick_warn():
     if act == "add": bot.loop.create_task(process_warn_and_punishment(int(uid), reason))
     return redirect('/')
 
+@app.route('/restore', methods=['POST'])
+def web_restore():
+    file = request.files.get('file')
+    if file:
+        bot.db = json.load(file)
+        bot.save_data()
+    return redirect('/')
+
 @app.route('/announce', methods=['POST'])
 def web_announce():
     ch = bot.get_channel(ANNOUNCE_CHANNEL_ID)
@@ -210,9 +215,8 @@ def web_backup():
     bot.loop.create_task(bot.send_backup("網頁手動備份"))
     return redirect('/')
 
-# --- Discord 指令 ---
 @bot.tree.command(name="警告")
-async def warn_cmd(interaction: discord.Interaction, 成員: discord.Member, 理由: str, 動作: str = "增加", 數量: int = 1):
+async def warn_cmd(interaction, 成員: discord.Member, 理由: str, 動作: str = "增加", 數量: int = 1):
     uid = str(成員.id)
     if 動作 == "增加": bot.db["warn_records"][uid] = bot.db["warn_records"].get(uid, 0) + 數量
     else: bot.db["warn_records"][uid] = max(0, bot.db["warn_records"].get(uid, 0) - 數量)
@@ -225,17 +229,15 @@ async def announce_cmd(interaction, 內容: str):
     ch = bot.get_channel(ANNOUNCE_CHANNEL_ID)
     if ch: 
         await ch.send(f"# 📢 公告\n# {內容}")
-        await interaction.response.send_message("✅ 公告已發布", ephemeral=True)
+        await interaction.response.send_message("✅ 已發布", ephemeral=True)
 
 @bot.tree.command(name="身分組")
-async def roles_cmd(interaction: discord.Interaction, 標題: str, 內容: str, 表情: str = "✅"):
+async def roles_cmd(interaction, 標題: str, 內容: str, 表情: str = "✅"):
     embed = discord.Embed(title=標題, description=內容, color=0x4f46e5)
     await interaction.response.send_message(embed=embed)
     msg = await interaction.original_response()
     await msg.add_reaction(表情)
-    bot.db["target_message_id"] = msg.id
-    bot.db["current_emoji"] = 表情
-    bot.save_data()
+    bot.db["target_message_id"] = msg.id; bot.db["current_emoji"] = 表情; bot.save_data()
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080))), daemon=True).start()
