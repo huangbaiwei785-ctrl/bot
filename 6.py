@@ -36,16 +36,16 @@ def load_db():
 class RoleView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-    @discord.ui.button(label="獲取/移除身分組", style=discord.ButtonStyle.secondary, custom_id="role_btn_gxyn")
+    @discord.ui.button(label="獲取/移除身分組", style=discord.ButtonStyle.secondary, custom_id="role_btn_gxyn_v6")
     async def toggle(self, interaction, button):
         role = interaction.guild.get_role(ROLE_ID)
         if not role: return await interaction.response.send_message("❌ 找不到身分組", ephemeral=True)
         if role in interaction.user.roles:
             await interaction.user.remove_roles(role)
-            await interaction.response.send_message(f"✅ 已從 {interaction.user.display_name} 移除身分組", ephemeral=True)
+            await interaction.response.send_message(f"✅ 已移除身分組", ephemeral=True)
         else:
             await interaction.user.add_roles(role)
-            await interaction.response.send_message(f"✅ 已為 {interaction.user.display_name} 領取身分組", ephemeral=True)
+            await interaction.response.send_message(f"✅ 已領取身分組", ephemeral=True)
 
 class IntegratedBot(commands.Bot):
     def __init__(self):
@@ -64,7 +64,7 @@ class IntegratedBot(commands.Bot):
         self.auto_backup.start()
 
     async def send_backup(self, reason):
-        ch = self.get_channel(BACKUP_CHANNEL_ID)
+        ch = self.get_channel(BACKUP_CHANNEL_ID) or await self.fetch_channel(BACKUP_CHANNEL_ID)
         if ch:
             self.save_data()
             await ch.send(f"📦 **Gxyn Clan [{reason}]**", file=discord.File(DATA_FILE))
@@ -76,23 +76,50 @@ class IntegratedBot(commands.Bot):
 
 bot = IntegratedBot()
 
+# --- 核心處罰邏輯 (詳細 Embed 版) ---
 async def check_punishment(member_id: int, reason: str, guild: discord.Guild):
     uid = str(member_id)
-    if bot.db["warn_records"].get(uid, 0) >= 4:
+    warn_count = bot.db["warn_records"].get(uid, 0)
+    
+    if warn_count >= 4:
+        # 紀錄次數並歸零警告
         bot.db["warn_records"][uid] = 0
         bot.db["violation_records"][uid] = bot.db["violation_records"].get(uid, 0) + 1
         v_count = bot.db["violation_records"][uid]
-        member = guild.get_member(member_id)
-        log_ch = bot.get_channel(WARN_LOG_CHANNEL_ID)
-        if v_count >= 3:
-            if member: await member.ban(reason=f"累犯滿 3 次自動停權。理由：{reason}")
-            if log_ch: await log_ch.send(f"🚫 **Gxyn 停權通知**：用戶 `{uid}` 累犯滿 3 次，已永久封鎖。")
-        else:
-            if member: await member.timeout(datetime.timedelta(days=1), reason=f"警告滿 4 支自動禁言。理由：{reason}")
-            if log_ch: await log_ch.send(f"🔇 **Gxyn 禁言通知**：用戶 `{uid}` 警告滿 4 支，禁言 1 天 (累犯: {v_count}/3)。")
         bot.save_data()
+        
+        log_ch = bot.get_channel(WARN_LOG_CHANNEL_ID) or await bot.fetch_channel(WARN_LOG_CHANNEL_ID)
+        member = guild.get_member(member_id) or await guild.fetch_member(member_id)
+        
+        if not member or not log_ch: return
 
-# --- Flask 網頁 ---
+        if v_count >= 3:
+            # 停權通知
+            embed = discord.Embed(title="🚫 Gxyn Clan 永久停權處分", color=0xff0000, timestamp=datetime.datetime.now())
+            embed.add_field(name="👤 被處罰人", value=f"{member.mention} ({member.name})", inline=False)
+            embed.add_field(name="📝 處罰理由", value=reason, inline=False)
+            embed.add_field(name="📊 累犯統計", value=f"已達第 **{v_count}** 次滿警告處置", inline=True)
+            embed.add_field(name="⚖️ 最終處決", value="永久封鎖 (BAN)", inline=True)
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text=f"Gxyn Clan 系統消息 • ID: {uid}")
+            
+            await member.ban(reason=f"Gxyn Clan 累犯滿 3 次。理由：{reason}")
+            await log_ch.send(content=member.mention, embed=embed)
+        else:
+            # 禁言通知
+            embed = discord.Embed(title="🔇 Gxyn Clan 違規處置通知", color=0xffaa00, timestamp=datetime.datetime.now())
+            embed.add_field(name="👤 被處罰人", value=f"{member.mention} ({member.name})", inline=False)
+            embed.add_field(name="📝 處罰理由", value=reason, inline=False)
+            embed.add_field(name="⏳ 懲罰內容", value="暫時禁言 1 天", inline=True)
+            embed.add_field(name="📈 累犯次數", value=f"第 **{v_count}** / 3 次", inline=True)
+            embed.add_field(name="♻️ 警告狀態", value="已歸零重新計算", inline=False)
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text=f"Gxyn Clan 系統消息 • ID: {uid}")
+            
+            await member.timeout(datetime.timedelta(days=1), reason=f"Gxyn Clan 警告滿 4 支。理由：{reason}")
+            await log_ch.send(content=member.mention, embed=embed)
+
+# --- Flask 與指令部分 (邏輯不變，僅確保呼叫正確) ---
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
@@ -101,7 +128,7 @@ HTML_TPL = """
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Gxyn Clan 管理後台</title>
+    <title>Gxyn Clan Admin</title>
     <style>
         :root { --sidebar-w: 260px; --primary: #4f46e5; --bg: #f3f4f6; }
         body { font-family: sans-serif; margin: 0; display: flex; background: var(--bg); color: #1f2937; }
@@ -124,13 +151,12 @@ HTML_TPL = """
     <div style="display:flex; justify-content:center; align-items:center; height:100vh; width:100%;">
         <div class="card" style="width:320px; text-align:center;">
             <h1 style="color:var(--primary)">Gxyn Clan</h1>
-            <form method="post" action="/login"><input type="password" name="pwd" placeholder="管理員密碼" required><button type="submit">登入</button></form>
+            <form method="post" action="/login"><input type="password" name="pwd" placeholder="密碼" required><button type="submit">登入</button></form>
         </div>
     </div>
 {% else %}
     <div class="sidebar">
         <div class="side-title">Gxyn Clan</div>
-        
         <div class="side-section">
             <h3>⚠️ 快速警告</h3>
             <form action="/quick_warn" method="post">
@@ -140,7 +166,6 @@ HTML_TPL = """
                 <button type="submit" name="act" value="sub" class="btn-orange">減少警告</button>
             </form>
         </div>
-
         <div class="side-section">
             <h3>📥 數據匯入</h3>
             <form action="/restore" method="post" enctype="multipart/form-data">
@@ -148,35 +173,28 @@ HTML_TPL = """
                 <button type="submit" style="background:#10b981;">匯入備份檔</button>
             </form>
         </div>
-        
-        <div style="flex-grow:1;">
-            <a href="/" style="padding:15px 25px; text-decoration:none; color:#4b5563; display:block;">🏠 系統狀態首頁</a>
-        </div>
+        <div style="flex-grow:1;"><a href="/" style="padding:15px 25px; text-decoration:none; color:#4b5563; display:block;">🏠 系統狀態</a></div>
         <a href="/logout" style="padding:15px 25px; text-decoration:none; color:#ef4444; border-top:1px solid #f3f4f6;">🚪 登出系統</a>
     </div>
-
     <div class="main">
         <div class="card">
             <h2>📌 目前狀態</h2>
-            <p>身分組訊息 ID: <b>{{ db.target_message_id }}</b> | 按鈕表情: <span style="font-size:24px;">{{ db.current_emoji }}</span></p>
+            <p>訊息 ID: <b>{{ db.target_message_id }}</b> | 表情: {{ db.current_emoji }}</p>
         </div>
         <div class="card">
             <h2>📢 發送全大字公告</h2>
-            <form action="/announce" method="post"><textarea name="content" rows="3" placeholder="輸入公告內容..." required></textarea><button type="submit">發送公告</button></form>
+            <form action="/announce" method="post"><textarea name="content" rows="3" required></textarea><button type="submit">發送</button></form>
         </div>
         <div class="card">
-            <h2>⚠️ 警告紀錄清單</h2>
+            <h2>⚠️ 警告紀錄</h2>
             <table>
-                <tr><th>用戶 ID</th><th>警告數</th><th>累犯次數</th></tr>
+                <tr><th>ID</th><th>警告數</th><th>累犯</th></tr>
                 {% for uid, count in db.warn_records.items() %}
-                <tr><td><code>{{ uid }}</code></td><td><b>{{ count }}</b> 支</td><td>{{ db.violation_records.get(uid, 0) }} 次</td></tr>
+                <tr><td><code>{{ uid }}</code></td><td>{{ count }} 支</td><td>{{ db.violation_records.get(uid, 0) }} 次</td></tr>
                 {% endfor %}
             </table>
         </div>
-        <div class="card">
-            <h2>💾 手動備份</h2>
-            <form action="/backup" method="post"><button type="submit">立即備份至 Discord 頻道</button></form>
-        </div>
+        <div class="card"><form action="/backup" method="post"><button type="submit">手動備份</button></form></div>
     </div>
 {% endif %}
 </body>
@@ -201,7 +219,7 @@ def quick_warn():
     else: bot.db["warn_records"][uid] = max(0, bot.db["warn_records"].get(uid, 0) - amount)
     bot.save_data()
     guild = bot.get_guild(MY_GUILD_ID)
-    if act == "add" and guild: bot.loop.create_task(check_punishment(int(uid), "網頁快速調整", guild))
+    if act == "add" and guild: bot.loop.create_task(check_punishment(int(uid), "網頁後台快速調整", guild))
     return redirect('/')
 
 @app.route('/restore', methods=['POST'])
@@ -223,19 +241,19 @@ def web_announce():
 def web_backup(): bot.loop.create_task(bot.send_backup("網頁手動備份")); return redirect('/')
 
 # --- Discord 指令 ---
-@bot.tree.command(name="警告", description="調整成員警告支數")
+@bot.tree.command(name="警告")
 async def warn_cmd(interaction: discord.Interaction, 成員: discord.Member, 理由: str, 動作: str = "增加", 數量: int = 1):
     uid = str(成員.id)
     if 動作 == "增加": bot.db["warn_records"][uid] = bot.db["warn_records"].get(uid, 0) + 數量
     else: bot.db["warn_records"][uid] = max(0, bot.db["warn_records"].get(uid, 0) - 數量)
     bot.save_data()
-    await interaction.response.send_message(f"✅ Gxyn 警告更新：{成員.mention} (數量: {數量})", ephemeral=True)
+    await interaction.response.send_message(f"✅ Gxyn 警告更新：{成員.mention}", ephemeral=True)
     if 動作 == "增加": await check_punishment(成員.id, 理由, interaction.guild)
 
 @bot.tree.command(name="公告")
 async def announce_cmd(interaction, 內容: str):
     ch = bot.get_channel(ANNOUNCE_CHANNEL_ID)
-    if ch: await ch.send(f"# 📢 公告\n# {內容}"); await interaction.response.send_message("✅ 公告已發送", ephemeral=True)
+    if ch: await ch.send(f"# 📢 公告\n# {內容}"); await interaction.response.send_message("✅ 發送成功", ephemeral=True)
 
 @bot.tree.command(name="身分組")
 async def roles_cmd(interaction, 標題: str, 內容: str, 表情: str = "🤡"):
