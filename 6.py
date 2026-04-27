@@ -57,7 +57,7 @@ bot = IntegratedBot()
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
-# --- 網頁 HTML ---
+# --- 網頁 HTML 模板 ---
 HTML_TPL = """
 <!DOCTYPE html>
 <html>
@@ -69,6 +69,8 @@ HTML_TPL = """
         .card { background: #23272a; padding: 15px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #7289da; }
         input, textarea, button { width: 100%; padding: 12px; margin: 8px 0; border-radius: 5px; border: none; box-sizing: border-box; }
         button { background: #7289da; color: white; font-weight: bold; cursor: pointer; }
+        .btn-backup { background: #43b581; }
+        .btn-restore { background: #faa61a; }
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
         th, td { border-bottom: 1px solid #444; padding: 10px; text-align: left; }
     </style>
@@ -81,13 +83,23 @@ HTML_TPL = """
                 <form method="post" action="/login"><input type="password" name="pwd" placeholder="輸入密碼" required><button type="submit">登入</button></form>
             </div>
         {% else %}
-            <h1>🛡️ 機器人控制面板 <a href="/logout" style="font-size:14px; color:#f04747;">[登出]</a></h1>
+            <h1>🛡️ 控制面板 <a href="/logout" style="font-size:14px; color:#f04747;">[登出]</a></h1>
             
             <div class="card">
-                <h3>📢 發送大字公告</h3>
+                <h3>📢 全大字公告</h3>
                 <form action="/announce" method="post">
-                    <textarea name="content" rows="2" placeholder="公告內容..." required></textarea>
-                    <button type="submit">發送公告</button>
+                    <textarea name="content" rows="3" placeholder="輸入內容..." required></textarea>
+                    <button type="submit">發送大字公告</button>
+                </form>
+            </div>
+
+            <div class="card">
+                <h3>💾 備份與上傳還原</h3>
+                <form action="/backup" method="post"><button type="submit" class="btn-backup">立即手動備份 (JSON)</button></form>
+                <hr style="border: 0.5px solid #444;">
+                <form action="/restore" method="post" enctype="multipart/form-data">
+                    <input type="file" name="file" accept=".json" required>
+                    <button type="submit" class="btn-restore">上傳 JSON 檔案還原數據</button>
                 </form>
             </div>
 
@@ -160,8 +172,25 @@ def web_announce():
     content = request.form.get('content')
     if content:
         ch = bot.get_channel(ANNOUNCE_CHANNEL_ID)
-        if ch: bot.loop.create_task(ch.send(f"# 📢 公告\n{content}"))
+        # 內容自動加上 # 語法實現全大字
+        if ch: bot.loop.create_task(ch.send(f"# 📢 公告\n# {content}"))
     return redirect(url_for('index'))
+
+@app.route('/backup', methods=['POST'])
+def web_backup():
+    if session.get('user') != 'admin': return redirect(url_for('index'))
+    bot.loop.create_task(bot.send_backup("網頁手動備份"))
+    return "✅ 備份已送出至 Discord 頻道 <a href='/'>返回</a>"
+
+@app.route('/restore', methods=['POST'])
+def web_restore():
+    if session.get('user') != 'admin': return redirect(url_for('index'))
+    file = request.files.get('file')
+    if file and file.filename.endswith('.json'):
+        bot.db = json.load(file)
+        bot.save_data()
+        return "✅ 數據已上傳並還原成功！ <a href='/'>返回</a>"
+    return "❌ 檔案格式錯誤"
 
 # --- Discord 指令 ---
 @bot.tree.command(name="警告", description="調整警告支數")
@@ -175,19 +204,30 @@ async def warn_cmd(interaction: discord.Interaction, 成員: discord.Member, 動
         bot.db["warn_records"][uid] = max(0, bot.db["warn_records"].get(uid, 0) - 數量)
         op = "減少"
     bot.save_data()
-    
-    # 指令執行後隱形回應
-    await interaction.response.send_message(f"✅ 已處理 {成員.mention}。理由：{理由}", ephemeral=True)
-    
-    # 發送 Embed 通知到警告頻道
+    await interaction.response.send_message(f"✅ 已處理。理由：{理由}", ephemeral=True)
     await log_warn_embed(op, uid, 數量, 理由, bot.db["warn_records"][uid], executor=interaction.user.display_name)
 
 @bot.tree.command(name="公告", description="發送大字公告")
 async def announce_cmd(interaction: discord.Interaction, 內容: str):
     ch = bot.get_channel(ANNOUNCE_CHANNEL_ID)
     if ch:
-        await ch.send(f"# 📢 公告\n{內容}")
+        await ch.send(f"# 📢 公告\n# {內容}")
         await interaction.response.send_message("✅ 已發送", ephemeral=True)
+
+@bot.tree.command(name="手動備份", description="立即將資料存檔至 Discord")
+async def backup_cmd(interaction: discord.Interaction):
+    await bot.send_backup("指令手動備份")
+    await interaction.response.send_message("✅ 檔案已送出", ephemeral=True)
+
+@bot.tree.command(name="還原數據", description="從最後一次 Discord 備份還原")
+async def restore_cmd(interaction: discord.Interaction):
+    channel = bot.get_channel(BACKUP_CHANNEL_ID)
+    async for m in channel.history(limit=5):
+        if m.attachments:
+            bot.db = json.loads(await m.attachments[0].read())
+            bot.save_data()
+            return await interaction.response.send_message("✅ 數據已自動還原", ephemeral=True)
+    await interaction.response.send_message("❌ 找不到檔案", ephemeral=True)
 
 if __name__ == "__main__":
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080))), daemon=True).start()
