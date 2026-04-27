@@ -18,130 +18,217 @@ DATA_FILE = "data.json"
 ROLE_ID = 1492939910641090710 
 # =============================================
 
+# 初始化資料檔
 def init_data():
     if not os.path.exists(DATA_FILE):
         with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump({"target_message_id": "無", "current_emoji": "🤡", "warn_records": {}, "violation_records": {}}, f, indent=4)
+            json.dump({
+                "target_message_id": "無", 
+                "current_emoji": "🤡", 
+                "warn_records": {},
+                "violation_records": {}
+            }, f, indent=4)
 
 init_data()
 
-# --- 側邊欄版 HTML 模板 ---
+class RoleView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+    @discord.ui.button(label="獲取/移除身分組", style=discord.ButtonStyle.secondary, custom_id="role_btn_final")
+    async def toggle(self, interaction, button):
+        role = interaction.guild.get_role(ROLE_ID)
+        if not role: return await interaction.response.send_message("❌ 找不到身分組", ephemeral=True)
+        if role in interaction.user.roles:
+            await interaction.user.remove_roles(role)
+            await interaction.response.send_message(f"✅ 已移除：{role.name}", ephemeral=True)
+        else:
+            await interaction.user.add_roles(role)
+            await interaction.response.send_message(f"✅ 已領取：{role.name}", ephemeral=True)
+
+class IntegratedBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix="!", intents=discord.Intents.all())
+        self.db = {}
+
+    def save_data(self):
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(self.db, f, ensure_ascii=False, indent=4)
+
+    async def setup_hook(self):
+        with open(DATA_FILE, "r") as f: self.db = json.load(f)
+        if "violation_records" not in self.db: self.db["violation_records"] = {}
+        self.add_view(RoleView())
+        guild = discord.Object(id=MY_GUILD_ID)
+        self.tree.copy_global_to(guild=guild)
+        await self.tree.sync(guild=guild)
+        self.auto_backup.start()
+
+    async def send_backup(self, reason):
+        ch = self.get_channel(BACKUP_CHANNEL_ID)
+        if ch:
+            self.save_data()
+            await ch.send(f"📦 **[{reason}]**", file=discord.File(DATA_FILE))
+
+    @tasks.loop(hours=6)
+    async def auto_backup(self):
+        await self.wait_until_ready()
+        await self.send_backup("定時自動備份")
+
+bot = IntegratedBot()
+
+# 懲處邏輯
+async def check_punishment(member: discord.Member, reason: str):
+    uid = str(member.id)
+    if bot.db["warn_records"].get(uid, 0) >= 4:
+        bot.db["warn_records"][uid] = 0
+        bot.db["violation_records"][uid] = bot.db["violation_records"].get(uid, 0) + 1
+        v_count = bot.db["violation_records"][uid]
+        log_ch = bot.get_channel(WARN_LOG_CHANNEL_ID)
+        if v_count >= 3:
+            await member.ban(reason=f"累犯滿 3 次自動停權。事由：{reason}")
+            if log_ch: await log_ch.send(f"🚫 **停權**：{member.mention} 累犯滿 3 次。")
+        else:
+            await member.timeout(datetime.timedelta(days=1), reason=f"警告滿 4 支自動禁言。事由：{reason}")
+            if log_ch: await log_ch.send(f"🔇 **禁言**：{member.mention} 滿 4 支警告，禁言 1 天。累犯：`{v_count}/3`")
+        bot.save_data()
+
+# --- Flask 網頁 ---
+app = Flask(__name__)
+app.secret_key = os.urandom(24)
+
 HTML_TPL = """
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>機器人管理後台</title>
+    <title>Gryn Clan 管理後台</title>
     <style>
-        :root { --sidebar-width: 240px; --primary-color: #4f46e5; --bg-light: #f9fafb; }
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; display: flex; background: var(--bg-light); color: #1f2937; }
-        
-        /* 側邊欄 */
-        .sidebar { width: var(--sidebar-width); background: #ffffff; height: 100vh; border-right: 1px solid #e5e7eb; position: fixed; display: flex; flex-direction: column; }
-        .sidebar-header { padding: 20px; font-size: 20px; font-weight: bold; border-bottom: 1px solid #f3f4f6; color: var(--primary-color); }
-        .sidebar-menu { padding: 10px; flex-grow: 1; }
-        .menu-item { padding: 12px 15px; text-decoration: none; color: #4b5563; display: block; border-radius: 8px; margin-bottom: 5px; cursor: pointer; border: none; background: none; width: 100%; text-align: left; font-size: 16px; }
-        .menu-item:hover { background: #f3f4f6; color: var(--primary-color); }
-        .logout-btn { color: #ef4444; border-top: 1px solid #f3f4f6; padding: 20px; text-decoration: none; font-weight: bold; }
-
-        /* 主內容區 */
-        .main-content { margin-left: var(--sidebar-width); padding: 40px; width: 100%; }
-        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 25px; border: 1px solid #f3f4f6; }
-        h2 { margin-top: 0; font-size: 1.5rem; border-left: 4px solid var(--primary-color); padding-left: 10px; }
-        
-        /* 表單與按鈕 */
-        input, textarea { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #d1d5db; border-radius: 6px; box-sizing: border-box; }
-        button { background: var(--primary-color); color: white; border: none; padding: 12px 20px; border-radius: 6px; cursor: pointer; font-weight: 600; transition: 0.2s; }
-        button:hover { opacity: 0.9; }
-        .btn-orange { background: #f59e0b; }
-        
-        /* 表格 */
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th, td { text-align: left; padding: 12px; border-bottom: 1px solid #f3f4f6; }
-        th { background: #f9fafb; color: #6b7280; font-weight: 600; }
-
-        /* 登入頁 */
-        .login-container { display: flex; justify-content: center; align-items: center; height: 100vh; width: 100%; background: #f3f4f6; }
-        .login-card { background: white; padding: 40px; border-radius: 15px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); width: 350px; text-align: center; }
+        :root { --sidebar-width: 240px; --primary: #4f46e5; --bg: #f9fafb; }
+        body { font-family: sans-serif; margin: 0; display: flex; background: var(--bg); color: #1f2937; }
+        .sidebar { width: var(--sidebar-width); background: white; height: 100vh; border-right: 1px solid #e5e7eb; position: fixed; display: flex; flex-direction: column; }
+        .sidebar-header { padding: 25px; font-size: 20px; font-weight: bold; color: var(--primary); border-bottom: 1px solid #f3f4f6; }
+        .sidebar-menu { padding: 15px; flex-grow: 1; }
+        .menu-item { padding: 12px; text-decoration: none; color: #4b5563; display: block; border-radius: 8px; margin-bottom: 5px; transition: 0.2s; }
+        .menu-item:hover { background: #f3f4f6; color: var(--primary); }
+        .main-content { margin-left: var(--sidebar-width); padding: 40px; width: calc(100% - var(--sidebar-width)); }
+        .card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 25px; }
+        h2 { margin-top: 0; border-left: 4px solid var(--primary); padding-left: 10px; font-size: 1.2rem; }
+        input, textarea, button { width: 100%; padding: 12px; margin: 8px 0; border-radius: 6px; border: 1px solid #d1d5db; box-sizing: border-box; }
+        button { background: var(--primary); color: white; border: none; font-weight: bold; cursor: pointer; }
+        table { width: 100%; border-collapse: collapse; } th, td { padding: 12px; border-bottom: 1px solid #f3f4f6; text-align: left; }
     </style>
 </head>
 <body>
-
 {% if not logged_in %}
-    <div class="login-container">
-        <div class="login-card">
-            <h1 style="color: var(--primary-color);">Gryn Clan</h1>
-            <p>請輸入管理員密碼</p>
-            <form method="post" action="/login">
-                <input type="password" name="pwd" placeholder="密碼" required>
-                <button type="submit" style="width: 100%;">登入系統</button>
-            </form>
+    <div style="display:flex; justify-content:center; align-items:center; height:100vh; width:100%;">
+        <div class="card" style="width:350px; text-align:center;">
+            <h1>🔑 登入系統</h1>
+            <form method="post" action="/login"><input type="password" name="pwd" required><button type="submit">登入</button></form>
         </div>
     </div>
 {% else %}
     <div class="sidebar">
-        <div class="sidebar-header">控制台</div>
+        <div class="sidebar-header">機器人管理</div>
         <nav class="sidebar-menu">
-            <a href="#status" class="menu-item">📌 系統狀態</a>
-            <a href="#announce" class="menu-item">📢 公告發送</a>
-            <a href="#warning" class="menu-item">⚠️ 警告名單</a>
-            <a href="#data" class="menu-item">💾 數據備份</a>
+            <a href="/" class="menu-item">📌 系統狀態</a>
+            <a href="/logout" class="menu-item" style="color:#ef4444; margin-top:20px;">🚪 登出系統</a>
         </nav>
-        <a href="/logout" class="logout-btn">🚪 登出系統</a>
     </div>
-
     <div class="main-content">
-        <div id="status" class="card">
+        <div class="card">
             <h2>📌 目前狀態</h2>
-            <p>目前身分組訊息 ID：<strong>{{ db.target_message_id }}</strong></p>
-            <p>目前按鈕表情符號：<span style="font-size: 24px;">{{ db.current_emoji }}</span></p>
+            <p>訊息 ID：<b>{{ db.target_message_id }}</b></p>
+            <p>目前表情：<span style="font-size:24px;">{{ db.current_emoji }}</span></p>
         </div>
-
-        <div id="announce" class="card">
-            <h2>📢 發送全大字公告</h2>
-            <form action="/announce" method="post">
-                <textarea name="content" rows="4" placeholder="在這裡輸入公告內容..." required></textarea>
-                <button type="submit">立即發送至 Discord</button>
-            </form>
+        <div class="card">
+            <h2>📢 發送公告</h2>
+            <form action="/announce" method="post"><textarea name="content" placeholder="公告內容..." required></textarea><button type="submit">發送</button></form>
         </div>
-
-        <div id="warning" class="card">
-            <h2>⚠️ 警告與累犯紀錄</h2>
+        <div class="card">
+            <h2>⚠️ 警告與累犯名單</h2>
             <table>
-                <thead>
-                    <tr><th>用戶 ID</th><th>警告數</th><th>累犯次數</th></tr>
-                </thead>
-                <tbody>
-                    {% for uid, count in db.warn_records.items() %}
-                    <tr>
-                        <td><code>{{ uid }}</code></td>
-                        <td><span style="color: #d97706; font-weight: bold;">{{ count }} 支</span></td>
-                        <td>{{ db.violation_records.get(uid, 0) }} 次</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
+                <tr><th>用戶 ID</th><th>警告</th><th>累犯</th></tr>
+                {% for uid, count in db.warn_records.items() %}
+                <tr><td><code>{{ uid }}</code></td><td>{{ count }} 支</td><td>{{ db.violation_records.get(uid, 0) }} 次</td></tr>
+                {% endfor %}
             </table>
         </div>
-
-        <div id="data" class="card">
-            <h2>💾 數據管理</h2>
-            <div style="display: flex; gap: 10px;">
-                <form action="/backup" method="post" style="flex: 1;">
-                    <button type="submit" style="width: 100%;">發送備份檔案</button>
-                </form>
-                <form action="/restore" method="post" enctype="multipart/form-data" style="flex: 1;">
-                    <input type="file" name="file" accept=".json" required style="margin: 0; padding: 8px;">
-                    <button type="submit" class="btn-orange" style="width: 100%; margin-top: 10px;">上傳 JSON 還原</button>
-                </form>
-            </div>
+        <div class="card">
+            <h2>💾 備份管理</h2>
+            <form action="/backup" method="post"><button type="submit">立即備份至 Discord</button></form>
+            <form action="/restore" method="post" enctype="multipart/form-data"><input type="file" name="file" accept=".json" required><button type="submit" style="background:#f59e0b;">上傳 JSON 還原</button></form>
         </div>
     </div>
 {% endif %}
-
 </body>
 </html>
 """
 
-# ... (後續的 RoleView, IntegratedBot, Flask Routes 與 Discord Commands 邏輯與前一版完全相同，請維持不變) ...
-# 注意：請確保將此 HTML_TPL 替換掉原本 6.py 裡的 HTML_TPL 部分。
+@app.route('/')
+def index(): return render_template_string(HTML_TPL, db=bot.db, logged_in=session.get('user') == 'admin')
+
+@app.route('/login', methods=['POST'])
+def login():
+    if request.form.get('pwd') == WEB_PASSWORD: session['user'] = 'admin'
+    return redirect('/')
+
+@app.route('/logout')
+def logout(): session.pop('user', None); return redirect('/')
+
+@app.route('/announce', methods=['POST'])
+def web_announce():
+    ch = bot.get_channel(ANNOUNCE_CHANNEL_ID)
+    if ch: bot.loop.create_task(ch.send(f"# 📢 公告\n# {request.form.get('content')}"))
+    return redirect('/')
+
+@app.route('/backup', methods=['POST'])
+def web_backup(): bot.loop.create_task(bot.send_backup("網頁手動備份")); return redirect('/')
+
+@app.route('/restore', methods=['POST'])
+def web_restore():
+    file = request.files.get('file')
+    if file: bot.db = json.load(file); bot.save_data()
+    return redirect('/')
+
+# --- Discord 指令 ---
+@bot.tree.command(name="公告", description="發送全大字公告")
+async def announce_cmd(interaction: discord.Interaction, 內容: str):
+    ch = bot.get_channel(ANNOUNCE_CHANNEL_ID)
+    if ch:
+        await ch.send(f"# 📢 公告\n# {內容}")
+        await interaction.response.send_message("✅ 公告已發送", ephemeral=True)
+
+@bot.tree.command(name="身分組", description="發送領取訊息")
+async def roles_cmd(interaction: discord.Interaction, 標題: str, 內容: str, 表情: str = "🤡"):
+    e = discord.Embed(title=標題, description=內容, color=0x4f46e5)
+    v = RoleView(); v.children[0].emoji = 表情
+    await interaction.response.send_message(embed=e, view=v)
+    msg = await interaction.original_response()
+    bot.db["target_message_id"] = msg.id; bot.db["current_emoji"] = 表情; bot.save_data()
+
+@bot.tree.command(name="警告", description="增加/減少警告")
+async def warn_cmd(interaction: discord.Interaction, 成員: discord.Member, 理由: str, 動作: str = "增加"):
+    uid = str(成員.id)
+    if 動作 == "增加": bot.db["warn_records"][uid] = bot.db["warn_records"].get(uid, 0) + 1
+    else: bot.db["warn_records"][uid] = max(0, bot.db["warn_records"].get(uid, 0) - 1)
+    bot.save_data()
+    await interaction.response.send_message(f"已處理 {成員.mention}", ephemeral=True)
+    if 動作 == "增加": await check_punishment(成員, 理由)
+
+@bot.tree.command(name="手動備份")
+async def m_backup(interaction: discord.Interaction):
+    await bot.send_backup("指令備份"); await interaction.response.send_message("✅ 已備份", ephemeral=True)
+
+@bot.tree.command(name="還原數據")
+async def m_restore(interaction: discord.Interaction):
+    ch = bot.get_channel(BACKUP_CHANNEL_ID)
+    async for m in ch.history(limit=5):
+        if m.attachments:
+            bot.db = json.loads(await m.attachments[0].read()); bot.save_data()
+            return await interaction.response.send_message("✅ 數據已還原", ephemeral=True)
+    await interaction.response.send_message("❌ 找不到檔案", ephemeral=True)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port), daemon=True).start()
+    bot.run(TOKEN)
