@@ -43,6 +43,7 @@ class IntegratedBot(commands.Bot):
         await self.tree.sync(guild=guild)
         self.auto_backup.start()
 
+    # --- 反應領取身分組邏輯 ---
     async def on_raw_reaction_add(self, payload):
         if payload.message_id == self.db.get("target_message_id") and str(payload.emoji) == self.db.get("current_emoji"):
             guild = self.get_guild(payload.guild_id)
@@ -59,11 +60,12 @@ class IntegratedBot(commands.Bot):
             if role and member and not member.bot:
                 await member.remove_roles(role)
 
+    # --- 備份功能 ---
     async def send_backup(self, reason):
         ch = self.get_channel(BACKUP_CHANNEL_ID) or await self.fetch_channel(BACKUP_CHANNEL_ID)
         if ch:
             self.save_data()
-            await ch.send(f"📦 **Gxyn Clan [{reason}]**", file=discord.File(DATA_FILE))
+            await ch.send(f"📦 **Gxyn Clan [{reason}]** (時間: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')})", file=discord.File(DATA_FILE))
 
     @tasks.loop(hours=6)
     async def auto_backup(self):
@@ -73,7 +75,7 @@ class IntegratedBot(commands.Bot):
 bot = IntegratedBot()
 
 # --- 核心通知與處罰邏輯 ---
-async def process_warn_and_punishment(member_id: int, reason: str, amount: int):
+async def process_warn_and_punishment(member_id: int, reason: str):
     guild = bot.get_guild(MY_GUILD_ID) or await bot.fetch_guild(MY_GUILD_ID)
     uid = str(member_id)
     log_ch = bot.get_channel(WARN_LOG_CHANNEL_ID) or await bot.fetch_channel(WARN_LOG_CHANNEL_ID)
@@ -83,13 +85,13 @@ async def process_warn_and_punishment(member_id: int, reason: str, amount: int):
 
     current_warns = bot.db["warn_records"].get(uid, 0)
 
-    # 1. 如果警告還沒滿 4 支，只發送警告增加通知
+    # 1. 如果警告不滿 4 支，發送藍色紀錄通知
     if current_warns < 4:
         embed = discord.Embed(title="⚠️ Gxyn Clan 警告紀錄", color=0x3498db, timestamp=datetime.datetime.now())
-        embed.add_field(name="👤 成員", value=f"{member.mention if member else uid}", inline=False)
+        embed.add_field(name="👤 被處罰人", value=f"{member.mention if member else uid}", inline=False)
         embed.add_field(name="📝 理由", value=reason, inline=False)
         embed.add_field(name="🔢 目前警告數", value=f"**{current_warns}** / 4", inline=True)
-        await log_ch.send(embed=embed)
+        await log_ch.send(content=f"{member.mention if member else ''}", embed=embed)
     
     # 2. 如果警告滿 4 支，觸發處罰邏輯
     else:
@@ -99,7 +101,6 @@ async def process_warn_and_punishment(member_id: int, reason: str, amount: int):
         bot.save_data()
 
         if v_count >= 3:
-            # 停權
             embed = discord.Embed(title="🚫 Gxyn Clan 永久停權處分", color=0xff0000, timestamp=datetime.datetime.now())
             embed.add_field(name="👤 被處罰人", value=f"{member.mention if member else uid}", inline=False)
             embed.add_field(name="📝 理由", value=reason, inline=False)
@@ -107,12 +108,11 @@ async def process_warn_and_punishment(member_id: int, reason: str, amount: int):
             if member: await member.ban(reason=f"累犯滿 3 次：{reason}")
             await log_ch.send(content=f"{member.mention if member else ''}", embed=embed)
         else:
-            # 禁言
-            embed = discord.Embed(title="🔇 Gxyn Clan 滿額處置 (禁言)", color=0xffaa00, timestamp=datetime.datetime.now())
+            embed = discord.Embed(title="🔇 Gxyn Clan 滿額禁言處置", color=0xffaa00, timestamp=datetime.datetime.now())
             embed.add_field(name="👤 被處罰人", value=f"{member.mention if member else uid}", inline=False)
             embed.add_field(name="📝 理由", value=reason, inline=False)
             embed.add_field(name="📈 累犯進度", value=f"第 {v_count} / 3 次", inline=True)
-            embed.add_field(name="⏳ 懲罰內容", value="禁言 1 天並警告歸零", inline=False)
+            embed.add_field(name="⏳ 懲罰", value="禁言 1 天並警告歸零", inline=False)
             if member: await member.timeout(datetime.timedelta(days=1), reason=f"警告滿 4 支：{reason}")
             await log_ch.send(content=f"{member.mention if member else ''}", embed=embed)
 
@@ -132,39 +132,47 @@ def index():
             .sidebar { width: var(--sidebar-w); background: white; height: 100vh; border-right: 1px solid #e5e7eb; position: fixed; }
             .main { margin-left: var(--sidebar-w); padding: 40px; width: 100%; box-sizing: border-box; }
             .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
-            input, button { width: 100%; padding: 10px; margin: 5px 0; border-radius: 6px; border: 1px solid #d1d5db; }
+            textarea, input, button { width: 100%; padding: 10px; margin: 5px 0; border-radius: 6px; border: 1px solid #d1d5db; box-sizing: border-box; }
             button { background: var(--primary); color: white; border: none; font-weight: bold; cursor: pointer; }
             table { width: 100%; border-collapse: collapse; } th, td { padding: 12px; border-bottom: 1px solid #f3f4f6; text-align: left; }
+            .side-title { padding: 25px; font-weight: bold; color: var(--primary); font-size: 20px; border-bottom: 2px solid #f3f4f6; }
         </style>
     </head>
     <body>
     {% if not logged_in %}
-        <div style="margin: 100px auto;" class="card"><form method="post" action="/login"><h2>登入</h2><input type="password" name="pwd" required><button type="submit">登入</button></form></div>
+        <div style="margin: 100px auto;" class="card"><form method="post" action="/login"><h2>Gxyn 登入</h2><input type="password" name="pwd" required><button type="submit">登入</button></form></div>
     {% else %}
         <div class="sidebar">
-            <div style="padding:25px; font-weight:bold; color:var(--primary); font-size:20px;">Gxyn Clan</div>
+            <div class="side-title">Gxyn Clan</div>
             <div style="padding:20px;">
+                <p style="font-size:12px; color:gray;">⚠️ 警告處置</p>
                 <form action="/quick_warn" method="post">
                     <input type="text" name="uid" placeholder="用戶 ID" required>
                     <input type="text" name="reason" placeholder="原因" required>
-                    <button type="submit" name="act" value="add">增加警告</button>
-                    <button type="submit" name="act" value="sub" style="background:#f59e0b;">扣除警告</button>
+                    <button type="submit" name="act" value="add">增加警告 (+)</button>
+                    <button type="submit" name="act" value="sub" style="background:#f59e0b;">扣除警告 (-)</button>
                 </form>
+                <hr style="margin: 20px 0; border: 0; border-top: 1px solid #eee;">
+                <form action="/backup" method="post"><button type="submit" style="background:#10b981;">📦 手動備份</button></form>
             </div>
-            <a href="/logout" style="display:block; padding:20px; color:red; text-decoration:none;">🚪 登出</a>
+            <a href="/logout" style="display:block; padding:20px; color:red; text-decoration:none;">🚪 登出系統</a>
         </div>
         <div class="main">
             <div class="card">
-                <h2>📌 目前狀態</h2>
-                <p>訊息 ID: <b>{{ db.target_message_id if db.target_message_id else '未設定' }}</b></p>
-                <p>反應表情: {{ db.current_emoji }}</p>
+                <h2>📌 系統狀態</h2>
+                <p>身分組訊息 ID: <b>{{ db.target_message_id if db.target_message_id else '未設定' }}</b></p>
+                <p>反應表情: <span style="font-size:20px;">{{ db.current_emoji }}</span></p>
             </div>
             <div class="card">
-                <h2>⚠️ 紀錄</h2>
+                <h2>📢 發送全大字公告</h2>
+                <form action="/announce" method="post"><textarea name="content" rows="3" placeholder="公告內容..." required></textarea><button type="submit">發送至公告頻道</button></form>
+            </div>
+            <div class="card">
+                <h2>⚠️ 紀錄名單</h2>
                 <table>
-                    <tr><th>ID</th><th>警告</th><th>累犯</th></tr>
+                    <tr><th>用戶 ID</th><th>警告數</th><th>累犯次數</th></tr>
                     {% for uid, count in db.warn_records.items() %}
-                    <tr><td><code>{{ uid }}</code></td><td>{{ count }}</td><td>{{ db.violation_records.get(uid, 0) }}</td></tr>
+                    <tr><td><code>{{ uid }}</code></td><td>{{ count }} 支</td><td>{{ db.violation_records.get(uid, 0) }} 次</td></tr>
                     {% endfor %}
                 </table>
             </div>
@@ -188,7 +196,18 @@ def quick_warn():
     if act == "add": bot.db["warn_records"][uid] = bot.db["warn_records"].get(uid, 0) + 1
     else: bot.db["warn_records"][uid] = max(0, bot.db["warn_records"].get(uid, 0) - 1)
     bot.save_data()
-    if act == "add": bot.loop.create_task(process_warn_and_punishment(int(uid), reason, 1))
+    if act == "add": bot.loop.create_task(process_warn_and_punishment(int(uid), reason))
+    return redirect('/')
+
+@app.route('/announce', methods=['POST'])
+def web_announce():
+    ch = bot.get_channel(ANNOUNCE_CHANNEL_ID)
+    if ch: bot.loop.create_task(ch.send(f"# 📢 公告\n# {request.form.get('content')}"))
+    return redirect('/')
+
+@app.route('/backup', methods=['POST'])
+def web_backup():
+    bot.loop.create_task(bot.send_backup("網頁手動備份"))
     return redirect('/')
 
 # --- Discord 指令 ---
@@ -199,7 +218,14 @@ async def warn_cmd(interaction: discord.Interaction, 成員: discord.Member, 理
     else: bot.db["warn_records"][uid] = max(0, bot.db["warn_records"].get(uid, 0) - 數量)
     bot.save_data()
     await interaction.response.send_message(f"✅ 已處理 {成員.mention}", ephemeral=True)
-    if 動作 == "增加": await process_warn_and_punishment(成員.id, 理由, 數量)
+    if 動作 == "增加": await process_warn_and_punishment(成員.id, 理由)
+
+@bot.tree.command(name="公告")
+async def announce_cmd(interaction, 內容: str):
+    ch = bot.get_channel(ANNOUNCE_CHANNEL_ID)
+    if ch: 
+        await ch.send(f"# 📢 公告\n# {內容}")
+        await interaction.response.send_message("✅ 公告已發布", ephemeral=True)
 
 @bot.tree.command(name="身分組")
 async def roles_cmd(interaction: discord.Interaction, 標題: str, 內容: str, 表情: str = "✅"):
