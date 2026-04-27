@@ -46,6 +46,7 @@ class IntegratedBot(commands.Bot):
         await self.tree.sync(guild=guild)
         self.auto_backup.start()
 
+    # --- 領取身分組邏輯 ---
     async def on_raw_reaction_add(self, payload):
         if payload.message_id == self.db.get("target_message_id") and str(payload.emoji) == self.db.get("current_emoji"):
             guild = self.get_guild(payload.guild_id)
@@ -75,6 +76,23 @@ class IntegratedBot(commands.Bot):
 
 bot = IntegratedBot()
 
+# --- 核心公告置頂管理 (上限 3 則) ---
+async def send_smart_announcement(content: str):
+    ch = bot.get_channel(ANNOUNCE_CHANNEL_ID) or await bot.fetch_channel(ANNOUNCE_CHANNEL_ID)
+    if not ch: return
+    
+    # 發送新公告
+    new_msg = await ch.send(content=f"@everyone\n# {content}")
+    await new_msg.pin()
+    
+    # 檢查釘選數量
+    pins = await ch.pins()
+    if len(pins) > 3:
+        # 解除最舊的一則 (pins 列表最後一則通常是最早釘選的)
+        oldest_pin = pins[-1]
+        await oldest_pin.unpin()
+
+# --- 核心處罰邏輯 ---
 async def process_warn_and_punishment(member_id: int, reason: str):
     guild = bot.get_guild(MY_GUILD_ID) or await bot.fetch_guild(MY_GUILD_ID)
     uid = str(member_id)
@@ -109,7 +127,7 @@ async def process_warn_and_punishment(member_id: int, reason: str):
             if member: await member.timeout(datetime.timedelta(days=1), reason=f"警告滿 4 支：{reason}")
             await log_ch.send(content=f"{member.mention if member else ''}", embed=embed)
 
-# --- Flask ---
+# --- Flask 網頁 ---
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
@@ -146,31 +164,23 @@ def index():
                 </form>
                 <hr style="margin:20px 0;">
                 <p style="font-size:12px; color:gray;">📥 數據還原</p>
-                <form action="/restore" method="post" enctype="multipart/form-data">
-                    <input type="file" name="file" accept=".json" required>
-                    <button type="submit" style="background:#8b5cf6;">匯入並還原</button>
-                </form>
+                <form action="/restore" method="post" enctype="multipart/form-data"><input type="file" name="file" accept=".json" required><button type="submit" style="background:#8b5cf6;">匯入並還原</button></form>
                 <form action="/backup" method="post" style="margin-top:10px;"><button type="submit" style="background:#10b981;">📦 手動備份</button></form>
             </div>
             <a href="/logout" style="display:block; padding:20px; color:red; text-decoration:none;">🚪 登出系統</a>
         </div>
         <div class="main">
+            <div class="card"><h2>📌 狀態</h2><p>領取身分組訊息 ID: {{ db.target_message_id }}</p></div>
             <div class="card">
-                <h2>📌 系統狀態</h2>
-                <p>訊息 ID: <b>{{ db.target_message_id if db.target_message_id else '未設定' }}</b></p>
-                <p>反應表情: {{ db.current_emoji }}</p>
-            </div>
-            <div class="card">
-                <h2>📢 發送公告</h2>
-                <form action="/announce" method="post"><textarea name="content" rows="3" required></textarea><button type="submit">發送</button></form>
+                <h2>📢 發送公告 (自動保留最新 3 則釘選)</h2>
+                <form action="/announce" method="post"><textarea name="content" rows="3" placeholder="公告內容..." required></textarea><button type="submit">發布新公告</button></form>
             </div>
             <div class="card">
                 <h2>⚠️ 紀錄名單</h2>
-                <table>
-                    <tr><th>ID</th><th>警告數</th><th>累犯</th></tr>
-                    {% for uid, count in db.warn_records.items() %}
-                    <tr><td><code>{{ uid }}</code></td><td>{{ count }}</td><td>{{ db.violation_records.get(uid, 0) }}</td></tr>
-                    {% endfor %}
+                <table><tr><th>ID</th><th>警告</th><th>累犯</th></tr>
+                {% for uid, count in db.warn_records.items() %}
+                <tr><td><code>{{ uid }}</code></td><td>{{ count }} 支</td><td>{{ db.violation_records.get(uid, 0) }} 次</td></tr>
+                {% endfor %}
                 </table>
             </div>
         </div>
@@ -199,15 +209,13 @@ def quick_warn():
 @app.route('/restore', methods=['POST'])
 def web_restore():
     file = request.files.get('file')
-    if file:
-        bot.db = json.load(file)
-        bot.save_data()
+    if file: bot.db = json.load(file); bot.save_data()
     return redirect('/')
 
 @app.route('/announce', methods=['POST'])
 def web_announce():
-    ch = bot.get_channel(ANNOUNCE_CHANNEL_ID)
-    if ch: bot.loop.create_task(ch.send(f"# 📢 公告\n# {request.form.get('content')}"))
+    content = request.form.get('content')
+    bot.loop.create_task(send_smart_announcement(content))
     return redirect('/')
 
 @app.route('/backup', methods=['POST'])
@@ -215,6 +223,7 @@ def web_backup():
     bot.loop.create_task(bot.send_backup("網頁手動備份"))
     return redirect('/')
 
+# --- Discord 指令 ---
 @bot.tree.command(name="警告")
 async def warn_cmd(interaction, 成員: discord.Member, 理由: str, 動作: str = "增加", 數量: int = 1):
     uid = str(成員.id)
@@ -226,10 +235,8 @@ async def warn_cmd(interaction, 成員: discord.Member, 理由: str, 動作: str
 
 @bot.tree.command(name="公告")
 async def announce_cmd(interaction, 內容: str):
-    ch = bot.get_channel(ANNOUNCE_CHANNEL_ID)
-    if ch: 
-        await ch.send(f"# 📢 公告\n# {內容}")
-        await interaction.response.send_message("✅ 已發布", ephemeral=True)
+    await interaction.response.send_message("⌛ 正在發布公告...", ephemeral=True)
+    await send_smart_announcement(內容)
 
 @bot.tree.command(name="身分組")
 async def roles_cmd(interaction, 標題: str, 內容: str, 表情: str = "✅"):
